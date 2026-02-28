@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	
 	"github.com/gaurav3000R/neuron-cli/internal/llm"
+	"github.com/gaurav3000R/neuron-cli/internal/tools"
 )
 
 var (
@@ -43,6 +44,13 @@ type streamDoneMsg struct{}
 // streamErrorMsg is sent when the LLM stream encounters an error
 type streamErrorMsg struct{ err error }
 
+// toolCallMsg is sent when the LLM decides to hit a tool
+type toolCallMsg struct {
+	ToolName string
+	Args     string
+	Result   string
+}
+
 // chatModel implements tea.Model
 type chatModel struct {
 	viewport    viewport.Model
@@ -51,6 +59,7 @@ type chatModel struct {
 	messages    []llm.Message
 	provider    llm.Provider
 	modelID     string
+	registry    *tools.Registry
 	
 	isStreaming bool
 	currentGen  strings.Builder
@@ -61,7 +70,7 @@ type chatModel struct {
 }
 
 // InitialModel configures the starting state of the TUI.
-func InitialModel(provider llm.Provider, modelID string) chatModel {
+func InitialModel(provider llm.Provider, modelID string, registry *tools.Registry) chatModel {
 	ta := textarea.New()
 	ta.Placeholder = "Ask Neuron... (Ctrl+D to send, Ctrl+C to quit)"
 	ta.Focus()
@@ -83,6 +92,7 @@ func InitialModel(provider llm.Provider, modelID string) chatModel {
 		viewport: vp,
 		provider: provider,
 		modelID:  modelID,
+		registry: registry,
 		messages: make([]llm.Message, 0),
 		ctx:      ctx,
 		cancel:   cancel,
@@ -163,6 +173,55 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 		return m, nil
 
+	case toolCallMsg:
+		m.isStreaming = false
+		// We execute the tool directly here for simplicity if not requiring approval.
+		// (A full implementation would pause and render an approval modal first, but
+		// we will auto-approve for brevity here unless building a complex policy tree).
+		
+		tool, ok := m.registry.Get(msg.ToolName)
+		if !ok {
+			m.err = fmt.Errorf("LLM tried to use unknown tool: %s", msg.ToolName)
+			m.updateViewport()
+			return m, nil
+		}
+
+		m.messages = append(m.messages, llm.Message{
+			Role:    llm.RoleAssistant,
+			Content: "",
+			ToolCalls: []llm.ToolCall{
+				{
+					Function: llm.FunctionCall{
+						Name:      msg.ToolName,
+						Arguments: msg.Args,
+					},
+				},
+			},
+		})
+
+		// Sandbox Execution
+		resultContext := fmt.Sprintf("\n[Executing %s...]\n", tool.Name())
+		m.currentGen.WriteString(resultContext)
+		m.updateViewport()
+
+		// Real sandbox execution
+		execResult, err := tool.Execute(m.ctx, json.RawMessage(msg.Args))
+		if err != nil {
+			execResult = fmt.Sprintf("Error executing tool: %v", err)
+		}
+
+		m.messages = append(m.messages, llm.Message{
+			Role:    "tool",
+			Content: execResult,
+		})
+
+		// Send the tool output back into the generation loop
+		m.isStreaming = true
+		m.currentGen.WriteString(fmt.Sprintf("[Result appended via tool: %s]\n", tool.Name()))
+		m.updateViewport()
+		
+		return m, m.generateResponse()
+
 	case streamErrorMsg:
 		m.isStreaming = false
 		m.err = msg.err
@@ -181,6 +240,7 @@ func (m *chatModel) generateResponse() tea.Cmd {
 		Model:    m.modelID,
 		Messages: m.messages,
 		Stream:   true,
+		Tools:    m.registry.GetDefinitions(),
 	}
 
 	tokenChan, errChan := m.provider.GenerateStream(m.ctx, req)
@@ -275,8 +335,8 @@ func (m *chatModel) View() string {
 }
 
 // Run is the main entrypoint called by the Cobra command.
-func Run(provider llm.Provider, modelID string) error {
-	m := InitialModel(provider, modelID)
+func Run(provider llm.Provider, modelID string, registry *tools.Registry) error {
+	m := InitialModel(provider, modelID, registry)
 	p := tea.NewProgram(&m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err

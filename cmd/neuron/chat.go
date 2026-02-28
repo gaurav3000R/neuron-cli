@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/gaurav3000R/neuron-cli/internal/llm"
+	"github.com/gaurav3000R/neuron-cli/internal/tools"
 	"github.com/gaurav3000R/neuron-cli/internal/tui"
 )
 
@@ -36,7 +37,12 @@ func startInteractiveChat() {
 		os.Exit(1)
 	}
 
-	if err := tui.Run(provider, model); err != nil {
+	registry := tools.NewRegistry()
+	registry.Register(&tools.ReadFileTool{})
+	registry.Register(&tools.WriteFileTool{})
+	registry.Register(&tools.ShellTool{})
+
+	if err := tui.Run(provider, model, registry); err != nil {
 		fmt.Printf("Error running TUI: %v\n", err)
 		os.Exit(1)
 	}

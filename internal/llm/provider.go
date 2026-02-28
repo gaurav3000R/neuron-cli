@@ -13,10 +13,20 @@ const (
 	RoleAssistant MessageRole = "assistant"
 )
 
-// Message represents a single chat message in the conversation history.
+// Message represent a single chat message
 type Message struct {
-	Role    MessageRole `json:"role"`
-	Content string      `json:"content"`
+	Role       MessageRole `json:"role"`
+	Content    string      `json:"content"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+}
+
+type ToolCall struct {
+	Function FunctionCall `json:"function"`
+}
+
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // CompletionRequest represents the input parameters for an LLM generation.
@@ -25,7 +35,19 @@ type CompletionRequest struct {
 	Messages  []Message
 	Stream    bool
 	JSONMode  bool
-	// Tools will be added in Phase 4
+	Tools     []Definition
+}
+
+// Definition represents the schema sent to OpenAI-compatible endpoints or Ollama.
+type Definition struct {
+	Type     string         `json:"type"`
+	Function FunctionSchema `json:"function"`
+}
+
+type FunctionSchema struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
 // Provider represents the contract that any integrated LLM backend must fulfill.

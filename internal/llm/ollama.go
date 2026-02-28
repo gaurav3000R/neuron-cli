@@ -27,10 +27,11 @@ func NewOllamaProvider(baseURL string) *OllamaProvider {
 }
 
 type ollamaChatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
-	Format   string    `json:"format,omitempty"` // e.g., "json"
+	Model    string       `json:"model"`
+	Messages []Message    `json:"messages"`
+	Stream   bool         `json:"stream"`
+	Format   string       `json:"format,omitempty"` // e.g., "json"
+	Tools    []Definition `json:"tools,omitempty"`
 }
 
 type ollamaChatResponse struct {
@@ -68,6 +69,7 @@ func (p *OllamaProvider) Generate(ctx context.Context, req CompletionRequest) (s
 		Model:    req.Model,
 		Messages: req.Messages,
 		Stream:   false,
+		Tools:    req.Tools,
 	}
 	if req.JSONMode {
 		ollamaReq.Format = "json"
@@ -115,6 +117,7 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req CompletionReque
 			Model:    req.Model,
 			Messages: req.Messages,
 			Stream:   true,
+			Tools:    req.Tools,
 		}
 		if req.JSONMode {
 			ollamaReq.Format = "json"

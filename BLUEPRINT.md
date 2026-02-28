@@ -11,12 +11,13 @@ Build a developer-first AI CLI that supports:
 - MCP-based tool/plugin ecosystem
 - Policy-gated execution with sandbox options
 - Interactive TUI and non-interactive automation mode
+- **Web-based UI** accessible locally alongside the CLI
 - Remote access via chat channels (Slack/WhatsApp)
 - Zero-dependency cross-platform distribution (Linux/macOS/Windows)
 
 ## 2. Recommended Tech Stack
 
-The architecture must yield a single, dependency-free binary that boots in under 50ms and seamlessly leverages multi-core or GPU constraints on the user's local instance.
+The architecture must yield a single, dependency-free binary that boots in under 50ms and seamlessly leverages multi-core or GPU constraints on the user's local instance. To support the **Web UI**, the frontend application will be compiled into the final binary as static assets.
 
 ### 2.1 Option A: The "Ollama/GitHub" Architecture (100% Go) - *Highly Recommended*
 
@@ -25,13 +26,14 @@ If ultimate speed, reliable offline local-llm inference, and broad system-level 
 - **Language:** Go 1.22+
 - **CLI Framework:** `spf13/cobra` or `urfave/cli/v2`
 - **TUI Engine:** `charmbracelet/bubbletea` + `lipgloss` (Unparalleled beautiful terminal UI)
+- **Web UI:** React/Vite frontend embedded natively via `go:embed`. Served locally via Go HTTP standard library or `gin`. Both the CLI and UI use the exact same internal Go APIs.
 - **Local LLM Engine:** Native Go bindings over `llama.cpp` (e.g. `go-llama.cpp`) or via `ollama` API.
 - **Config & Validation:** `spf13/viper`, `go-playground/validator`
 - **Build & Release:** `goreleaser` (Automated building for all OS/Arch combinations)
 - **Database:** `mattn/go-sqlite3` or `glebarez/sqlite` (pure Go SQLite)
 
 **Why Go?**
-Go is the industry standard for cloud-native CLI tooling (Docker, Kubernetes, GitHub CLI, Ollama). It provides native concurrency (goroutines), effortless cross-compilation, a statically linked single binary (no Node/Python installed locally), and millisecond boot times. 
+Go is the industry standard for cloud-native CLI tooling (Docker, Kubernetes, GitHub CLI, Ollama). Using `go:embed`, you can compile a full 10MB React Single Page Application (SPA) directly into the binary with zero performance hit or extra files for the user to manage.
 
 ### 2.2 Option B: The "Modern Web" Architecture (100% TypeScript + Bun)
 
@@ -41,12 +43,13 @@ If the team has exclusive TypeScript expertise, needs to leverage vast NPM ecosy
 - **Language:** TypeScript (Strict Mode)
 - **CLI Framework:** `commander` or `cleye`
 - **TUI Engine:** `ink` (React for the terminal)
+- **Web UI:** React/Vite/NextJS API routes served by Bun's native lightning-fast `Bun.serve`. Compiled React frontend assets embedded via Bun loaders.
 - **Validation:** `zod`
 - **Database:** `libSQL` or `bun:sqlite`
 - **Local LLM Engine:** `node-llama-cpp` (pre-compiled bindings)
 
 **Why Bun/TS?**
-Node.js is too slow for CLIs, and requiring the user to install Node is poor UX. However, Bun allows compiling a TypeScript application down into a standalone binary exactly like Go. 
+Node.js is extremely difficult to distribute as a single binary without awful UX (like pkg or Nexe injecting massive node virtual instances). Bun compiles pure TypeScript apps directly into native executables. You can build both the terminal app and Web API in unified TS.
 
 ---
 
@@ -59,15 +62,16 @@ neuron-cli/
 ├── cmd/
 │   └── neuron/                # The main entrypoint
 ├── internal/                  # Private application code
-│   ├── tui/                   # UI views, state machines (Bubbletea or Ink components)
+│   ├── ui/                    # Web API servers bridging models to web client
+│   ├── tui/                   # Terminal UI views (Bubbletea or Ink)
 │   ├── cli/                   # Command parsing, flag handling
 │   ├── config/                # Settings, policies, state validation
-│   ├── llm/                   # Model routing, Ollama/llama.cpp adapters, Claude/OpenAI APIs
+│   ├── llm/                   # Model routing, Ollama/llama.cpp adapters, API routing
 │   ├── mcp/                   # Model Context Protocol server/client orchestration
 │   ├── channels/              # Slack/WhatsApp adapters
-│   ├── sandbox/               # Execution environments (none, docker)
 │   ├── tools/                 # Built-in file, search, shell tools
-│   └── telemetry/             # OpenTelemetry + local analytics
+│   └── sandbox/               # Execution environments (none, docker)
+├── ui/                        # **NEW**: The React/Vite Frontend Application Directory
 ├── pkg/                       # Public SDK code (if building extensions)
 ├── docs/                      # Architecture, tools, docs
 ├── schemas/                   # JSON schemas for settings
@@ -80,74 +84,39 @@ neuron-cli/
 ### 4.1 Command Surface
 
 Base commands:
-- `neuron chat` (Default interactive session)
+- `neuron chat` (Default interactive terminal session)
+- `neuron root` / `neuron ui` (**NEW**: Starts the Web Server and opens `localhost:3133` in the browser)
 - `neuron run -p "..."` (Headless agent mode)
 - `neuron model` (List, switch remote vs local)
 - `neuron tools` (Enable, disable built-in/MCP tools)
-- `neuron mcp` (Attach context servers)
 - `neuron config` (View/edit settings)
 - `neuron channels` (Slack/WhatsApp setup)
 
-Slash commands within the Interactive TUI:
-- `/model`, `/tools`, `/mcp`, `/clear`, `/plan`, `/run`, `/git`
+### 4.2 Handling the Web UI + CLI Concurrency
 
-### 4.2 Tooling System
+The system should run a background daemon (or run API endpoints internally when the UI is booted) so both the CLI and Web UI share the identical state. 
+
+1. **State:** Both the CLI and Web interface pull conversation history from `~/.config/neuron/data.db`.
+2. **API:** The UI makes HTTP or WebSocket requests to the local port (e.g. `http://127.0.0.1:3133/api/chat`).
+3. **Execution:** The backend logic mapping tool calls, routing, and approvals belongs exclusively to `internal/llm` and `internal/tools`. The CLI/TUI and Web UI merely submit intents to this internal Go/Bun logic.
+
+### 4.3 Tooling System
 
 Built-in tools to ship immediately (Fast, Native):
-- **fs:** fast read/write/list/glob (native stdlib)
-- **search:** ripgrep wrapper or native Go/Rust equivalent regex parser
-- **shell:** Safe execution with TUI approval prompt
+- **fs:** fast read/write/list/glob
+- **search:** ripgrep wrapper
+- **shell:** Safe execution with Approval Prompts (sent via terminal or websocket to web UI)
 - **git:** Status, diff, commit helpers
-- **web:** Fetch/Scrape using fast headless clients.
 
-**Extensibility (MCP):**
-Support the Model Context Protocol natively. The CLI acts as an MCP Client connecting to external `npx` or binary MCP servers as sub-processes. 
-
-### 4.3 Model and Provider Layer
-
-**The Routing Engine:**
-- Normalize requests/responses (`{ role: 'user', content: '...' }`)
-- Support streaming tokens to the UI natively.
-- Handle JSON mode and native Tool-Calling modes.
+### 4.4 Model and Provider Layer
 
 **Local-First Architecture:**
 1. **Ollama Integration:** Fast-path to `http://localhost:11434`. (Primary local provider)
-2. **Cloud Fallback:** Anthropic/OpenAI/Google if `preferLocal=false` or explicitly requested. 
-
-**Local Lifecycle Commands:**
-- `neuron local pull <model>`
-- `neuron local ls`
-- `neuron local rm <model>`
-- `neuron local start/stop <model>`
-
-### 4.4 Policy + Sandbox
-
-Mandatory controls before executing `shell` or `fs` tools:
-- **Approval Modes:** 
-  - `default` (ask before every destructive action)
-  - `auto_edit` (ask only on shell exec)
-  - `plan` (propose all actions first)
-- **Sandbox Backends:**
-  - Native Host (None)
-  - Docker container wrapper 
+2. **Cloud Fallback:** Anthropic/OpenAI if `preferLocal=false`. 
 
 ### 4.5 Persistence
 
 - Store session history, tool logs, and cached context in a local SQLite file (`~/.config/neuron/data.db`).
-- Use JSON/TOML for human-editable `.neuron.json` settings in the workspace path.
-
-### 4.6 Remote Channel Access (Slack + WhatsApp)
-
-When functioning as a bot backend:
-- Run via `neuron channels serve`
-- Expose webhook endpoints securely. 
-- Map Channel Users -> Neuron Principal IDs. 
-- Map Channel Threads -> Neuron SQLite Session IDs. 
-
-### 4.7 Testing Strategy
-
-- **Unit tests:** Extensive stdlib testing (Go `testing` or TS `vitest`).
-- **Integration Tests:** Execute the compiled binary in a temporary directory via shell scripts to validate model routing and tool execution.
 
 ## 5. Implementation Milestones
 
@@ -155,31 +124,25 @@ When functioning as a bot backend:
 - Single Binary Monorepo scaffolding
 - Config loader + schema validation
 - Basic `neuron --help` and routing skeleton
-- Compile/Build scripts pipeline in place
 
-### Milestone 1: Interactive CLI (Week 2)
+### Milestone 1: Core API & Terminal CLI (Week 2)
 - TUI app shell (Bubbletea or Ink)
-- Streaming interface
-- Model adapter abstraction (OpenAI/Anthropic stubs)
+- Core `llm` and `tools` internal packages (Streaming, Tool calling logic)
 
-### Milestone 2: The Local Engine (Week 3)
+### Milestone 2: The Web UI (Week 3) (NEW)
+- Scaffold Vite/React app in `/ui`
+- Bind API server in core to serve SPA via `go:embed` or Bun bundler
+- Implement Chat, Config, and Tool Toggle screens in React
+- Connect Web UI websockets to Core API logs. 
+
+### Milestone 3: Local Engine & Tools (Week 4)
 - Ollama local integration
-- Local model lifecycle (`neuron local pull/run`)
-- Session persistence to SQLite
+- Local Web UI/TUI approval interceptors (prompts for `shell` allow/deny).
 
-### Milestone 3: Built-in Tools & Safety (Week 4)
-- Local File read/write tools
-- Shell execution tool with TUI Approval Prompt
-- Ripgrep integration
-
-### Milestone 4: MCP + Extensions (Week 5)
+### Milestone 4: MCP + Extensions + Channels (Week 5 & 6)
 - MCP client process spawning
-- Tool discovery and parsing
+- Slack/WhatsApp webhooks mapping
 
-### Milestone 5: Channels (Week 6)
-- Slack webhooks and thread mapping
-- WhatsApp payload formatting
-
-### Milestone 6: Distribution (Week 7)
+### Milestone 5: Distribution (Week 7)
 - CI Matrix (Linux/macOS/Windows)
-- Automated `.exe`, `.tar.gz`, and Homebrew Tap generation via GitHub Actions (GoReleaser)
+- Compile CLI + embedded React UI into a single `.exe`, `.tar.gz`, via GitHub Actions.

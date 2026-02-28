@@ -1,0 +1,16 @@
+{
+  "name": "neuron-cli-workspace",
+  "version": "1.0.0",
+  "description": "Monorepo workspace for Neuron CLI",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "doctor": "node scripts/doctor.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "picocolors": "^1.0.0"
+  }
+}

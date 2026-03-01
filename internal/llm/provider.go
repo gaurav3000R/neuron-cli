@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 )
 
 // MessageRole defines the sender of a chat message.

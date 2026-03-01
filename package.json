@@ -5,7 +5,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "doctor": "node scripts/doctor.js"
+    "doctor": "node scripts/doctor.js",
+    "dev:ui": "npm run dev --prefix ui",
+    "build:ui": "npm run build --prefix ui",
+    "build": "npm run build:ui && go build -o bin/neuron cmd/neuron/*.go",
+    "start": "npm run ui",
+    "chat": "go run cmd/neuron/*.go chat",
+    "ui": "go run cmd/neuron/*.go ui",
+    "cli:run": "go run cmd/neuron/*.go run",
+    "cli:config": "go run cmd/neuron/*.go config",
+    "ollama:start": "ollama serve",
+    "release:local": "goreleaser release --snapshot --clean"
   },
   "engines": {
     "node": ">=20.0.0"

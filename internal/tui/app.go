@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -9,7 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	
+
 	"github.com/gaurav3000R/neuron-cli/internal/llm"
 	"github.com/gaurav3000R/neuron-cli/internal/tools"
 )
@@ -53,20 +54,20 @@ type toolCallMsg struct {
 
 // chatModel implements tea.Model
 type chatModel struct {
-	viewport    viewport.Model
-	textarea    textarea.Model
-	
-	messages    []llm.Message
-	provider    llm.Provider
-	modelID     string
-	registry    *tools.Registry
-	
+	viewport viewport.Model
+	textarea textarea.Model
+
+	messages []llm.Message
+	provider llm.Provider
+	modelID  string
+	registry *tools.Registry
+
 	isStreaming bool
 	currentGen  strings.Builder
-	
-	err         error
-	ctx         context.Context
-	cancel      context.CancelFunc
+
+	err    error
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // InitialModel configures the starting state of the TUI.
@@ -113,12 +114,12 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	switch msg := msg.(type) {
-	
+
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
-		
+
 		// Map 'Enter' to submit the prompt instead of newline
 		case tea.KeyEnter:
 			if m.isStreaming {
@@ -128,22 +129,22 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if text == "" {
 				return m, nil
 			}
-			
+
 			// Reset textarea
 			m.textarea.Reset()
-			
+
 			// Add user message to history
 			m.messages = append(m.messages, llm.Message{
 				Role:    llm.RoleUser,
 				Content: text,
 			})
-			
+
 			// Kick off LLM generation
 			m.isStreaming = true
 			m.currentGen.Reset()
 			m.err = nil
 			m.updateViewport()
-			
+
 			return m, m.generateResponse()
 		}
 
@@ -178,7 +179,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// We execute the tool directly here for simplicity if not requiring approval.
 		// (A full implementation would pause and render an approval modal first, but
 		// we will auto-approve for brevity here unless building a complex policy tree).
-		
+
 		tool, ok := m.registry.Get(msg.ToolName)
 		if !ok {
 			m.err = fmt.Errorf("LLM tried to use unknown tool: %s", msg.ToolName)
@@ -219,7 +220,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isStreaming = true
 		m.currentGen.WriteString(fmt.Sprintf("[Result appended via tool: %s]\n", tool.Name()))
 		m.updateViewport()
-		
+
 		return m, m.generateResponse()
 
 	case streamErrorMsg:
@@ -236,11 +237,24 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // generateResponse invokes the LLM Provider and returns the initial token pipeline command
 func (m *chatModel) generateResponse() tea.Cmd {
+	toolDefs := m.registry.GetDefinitions()
+	var llmTools []llm.Definition
+	for _, def := range toolDefs {
+		llmTools = append(llmTools, llm.Definition{
+			Type: def.Type,
+			Function: llm.FunctionSchema{
+				Name:        def.Function.Name,
+				Description: def.Function.Description,
+				Parameters:  def.Function.Parameters,
+			},
+		})
+	}
+
 	req := llm.CompletionRequest{
 		Model:    m.modelID,
 		Messages: m.messages,
 		Stream:   true,
-		Tools:    m.registry.GetDefinitions(),
+		Tools:    llmTools,
 	}
 
 	tokenChan, errChan := m.provider.GenerateStream(m.ctx, req)
@@ -271,7 +285,7 @@ func waitForNextToken(tokenChan <-chan string, errChan <-chan error) tea.Cmd {
 				}
 				return streamDoneMsg{}
 			}
-			// We received a token, we must return a command containing the token AND the channels 
+			// We received a token, we must return a command containing the token AND the channels
 			// so the Update loop can recurse.
 			return tokenResponseMsg{
 				token:     token,
@@ -317,14 +331,14 @@ func (m *chatModel) updateViewport() {
 
 func (m *chatModel) View() string {
 	header := titleStyle.Render(fmt.Sprintf(" Neuron CLI (%s) ", m.modelID))
-	
+
 	historyView := m.viewport.View()
-	
+
 	inputLabel := "  "
 	if m.isStreaming {
-		inputLabel = "░ " 
+		inputLabel = "░ "
 	}
-	
+
 	return fmt.Sprintf(
 		"%s\n%s\n\n%s%s",
 		header,

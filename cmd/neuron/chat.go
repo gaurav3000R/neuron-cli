@@ -32,8 +32,9 @@ func startInteractiveChat() {
 
 	err := provider.Preflight(ctx, model)
 	if err != nil {
-		fmt.Printf("[Error] Cannot reach Ollama at %s.\n", baseURL)
-		fmt.Printf("Make sure Ollama is running (`ollama serve`).\nDetails: %v\n", err)
+		fmt.Printf("❌ Preflight check failed for model %q at %s\n", model, baseURL)
+		fmt.Printf("Details: %v\n", err)
+		fmt.Printf("\n💡 Make sure Ollama is running: ollama serve\n")
 		os.Exit(1)
 	}
 
@@ -41,16 +42,6 @@ func startInteractiveChat() {
 	registry.Register(&tools.ReadFileTool{})
 	registry.Register(&tools.WriteFileTool{})
 	registry.Register(&tools.ShellTool{})
-
-	// Add an example MCP Server connection for Demo (SQLite in this case, a common initial MCP test)
-	// You need `npx` installed and an `npx -y @modelcontextprotocol/server-sqlite` command available.
-	// In a real application, these paths would be loaded from config.yaml!
-	mcpClient, err := tools.LoadMCPServer(ctx, registry, "sqlite", "npx", "-y", "@modelcontextprotocol/server-sqlite", "--help")
-	if err != nil {
-		fmt.Printf("[Warning] Failed to load example MCP server: %v\n", err)
-	} else {
-		defer mcpClient.Close()
-	}
 
 	if err := tui.Run(provider, model, registry); err != nil {
 		fmt.Printf("Error running TUI: %v\n", err)

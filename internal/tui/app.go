@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,51 +21,60 @@ var (
 	titleStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFFDF5")).
 			Background(lipgloss.Color("#25A065")).
-			Padding(0, 1)
+			Padding(0, 1).
+			Bold(true)
 
-	userRoleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#569CD6")).
-			Bold(true).
-			MarginTop(1)
+	userStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#00D9FF")).
+			Bold(true)
 
-	assistantRoleStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#4EC9B0")).
-				Bold(true).
-				MarginTop(1)
+	assistantStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#50FA7B")).
+				Bold(true)
 
 	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#F44336")).
+			Foreground(lipgloss.Color("#FF5555")).
 			Bold(true)
+
+	dimStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#6272A4"))
+
+	toolStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFB86C")).
+			Italic(true)
 )
 
-// tokenMsg is sent when a new token arrives from the LLM stream
+// Messages for bubbletea
 type tokenMsg string
-
-// streamDoneMsg is sent when the LLM stream completes successfully
 type streamDoneMsg struct{}
-
-// streamErrorMsg is sent when the LLM stream encounters an error
 type streamErrorMsg struct{ err error }
-
-// toolCallMsg is sent when the LLM decides to hit a tool
 type toolCallMsg struct {
 	ToolName string
-	Args     string
-	Result   string
+	Args     json.RawMessage
+}
+type toolResultMsg struct {
+	Result string
+	Error  error
 }
 
 // chatModel implements tea.Model
 type chatModel struct {
 	viewport viewport.Model
 	textarea textarea.Model
+	spinner  spinner.Model
 
 	messages []llm.Message
 	provider llm.Provider
 	modelID  string
 	registry *tools.Registry
 
-	isStreaming bool
-	currentGen  strings.Builder
+	isStreaming    bool
+	currentGen     strings.Builder
+	chatHistory    strings.Builder
+	pendingToolMsg *toolCallMsg
+
+	tokenChan <-chan string
+	errChan   <-chan error
 
 	err    error
 	ctx    context.Context
@@ -71,26 +82,29 @@ type chatModel struct {
 }
 
 // InitialModel configures the starting state of the TUI.
-func InitialModel(provider llm.Provider, modelID string, registry *tools.Registry) chatModel {
+func InitialModel(provider llm.Provider, modelID string, registry *tools.Registry) *chatModel {
 	ta := textarea.New()
-	ta.Placeholder = "Ask Neuron... (Ctrl+D to send, Ctrl+C to quit)"
+	ta.Placeholder = "Type your message and press Enter..."
 	ta.Focus()
-	ta.Prompt = "> "
-	ta.CharLimit = 4096
+	ta.Prompt = "│ "
+	ta.CharLimit = 8192
 	ta.SetWidth(80)
 	ta.SetHeight(3)
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.ShowLineNumbers = false
-	ta.KeyMap.InsertNewline.SetEnabled(false) // We want Enter to submit, Shift+Enter for newline (not easily configurable without custom keymap, but we'll use Ctrl+D for send conventionally, or hijack Enter).
 
 	vp := viewport.New(80, 20)
-	vp.SetContent("Welcome to Neuron CLI.\nType a message to begin.")
+
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF79C6"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return chatModel{
+	m := &chatModel{
 		textarea: ta,
 		viewport: vp,
+		spinner:  sp,
 		provider: provider,
 		modelID:  modelID,
 		registry: registry,
@@ -98,145 +112,237 @@ func InitialModel(provider llm.Provider, modelID string, registry *tools.Registr
 		ctx:      ctx,
 		cancel:   cancel,
 	}
+
+	m.addToChatHistory(dimStyle.Render("╭─ Welcome to Neuron CLI ─╮"))
+	m.addToChatHistory(dimStyle.Render(fmt.Sprintf("│ Model: %s", modelID)))
+	m.addToChatHistory(dimStyle.Render(fmt.Sprintf("│ Tools: %d available", len(registry.GetAll()))))
+	m.addToChatHistory(dimStyle.Render("╰───────────────────────────╯"))
+	m.addToChatHistory("")
+	m.updateViewport()
+
+	return m
 }
 
 func (m *chatModel) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, m.spinner.Tick)
 }
 
 func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		tiCmd tea.Cmd
 		vpCmd tea.Cmd
+		spCmd tea.Cmd
 	)
 
 	m.textarea, tiCmd = m.textarea.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
+	m.spinner, spCmd = m.spinner.Update(msg)
 
 	switch msg := msg.(type) {
 
 	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
+		switch msg.String() {
+		case "ctrl+c":
+			m.cancel()
 			return m, tea.Quit
 
-		// Map 'Enter' to submit the prompt instead of newline
-		case tea.KeyEnter:
+		case "enter":
 			if m.isStreaming {
-				return m, nil // Ignore input while generating
+				return m, nil
 			}
 			text := strings.TrimSpace(m.textarea.Value())
 			if text == "" {
 				return m, nil
 			}
 
-			// Reset textarea
 			m.textarea.Reset()
-
-			// Add user message to history
-			m.messages = append(m.messages, llm.Message{
-				Role:    llm.RoleUser,
-				Content: text,
-			})
-
-			// Kick off LLM generation
-			m.isStreaming = true
-			m.currentGen.Reset()
-			m.err = nil
-			m.updateViewport()
-
-			return m, m.generateResponse()
+			m.handleUserMessage(text)
+			return m, tea.Batch(m.generateResponse(), m.spinner.Tick)
 		}
 
 	case tea.WindowSizeMsg:
 		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - m.textarea.Height() - 3 // Leave room for textarea and title
-		m.textarea.SetWidth(msg.Width)
+		headerHeight := 4
+		footerHeight := 6
+		m.viewport.Height = msg.Height - headerHeight - footerHeight
+		m.textarea.SetWidth(msg.Width - 4)
 		m.updateViewport()
 
-	case tokenResponseMsg:
-		// Append token to current generation and re-render
-		m.currentGen.WriteString(msg.token)
+	case tokenMsg:
+		token := string(msg)
+		
+		// Log the exact token for debugging  
+		prefix := token
+		if len(token) > 20 {
+			prefix = token[:20]
+		}
+		slog.Info("TUI received token", "token_prefix", prefix, "length", len(token))
+		
+		// Check for tool call marker using strings.HasPrefix
+		if strings.HasPrefix(token, "__TOOL_CALL__") {
+			slog.Info("TUI detected tool call marker - processing")
+			toolCallJSON := strings.TrimPrefix(token, "__TOOL_CALL__")
+			slog.Debug("Tool call JSON", "json", toolCallJSON)
+			
+			var toolCalls []llm.ToolCall
+			if err := json.Unmarshal([]byte(toolCallJSON), &toolCalls); err != nil {
+				slog.Error("Failed to parse tool calls", "error", err, "json", toolCallJSON)
+				m.addToChatHistory(errorStyle.Render(fmt.Sprintf("Error parsing tool calls: %v", err)))
+				m.updateViewport()
+				return m, nil
+			}
+			
+			// Execute the first tool call (handle multiple later)
+			if len(toolCalls) > 0 {
+				tc := toolCalls[0]
+				slog.Info("Executing tool", "name", tc.Function.Name, "args", string(tc.Function.Arguments))
+				
+				// Add tool call to message history
+				m.messages = append(m.messages, llm.Message{
+					Role:     llm.RoleAssistant,
+					Content:  "",
+					ToolCalls: toolCalls,
+				})
+				
+				return m, m.executeTool(toolCallMsg{
+					ToolName: tc.Function.Name,
+					Args:     tc.Function.Arguments,
+				})
+			}
+			return m, nil
+		}
+		
+		// Regular token - add to output
+		m.currentGen.WriteString(token)
 		m.updateViewport()
-		m.viewport.GotoBottom()
-		// Recursively wait for the next token using the provided channels
-		return m, waitForNextToken(msg.tokenChan, msg.errChan)
+		return m, m.waitForNextToken()
 
 	case streamDoneMsg:
+		slog.Info("TUI received streamDone")
+		content := m.currentGen.String()
+		slog.Info("Final content", "content", content, "length", len(content))
+		if content != "" {
+			m.messages = append(m.messages, llm.Message{
+				Role:    llm.RoleAssistant,
+				Content: content,
+			})
+			m.addToChatHistory("")
+			m.addToChatHistory(assistantStyle.Render("Assistant:"))
+			m.addToChatHistory(content)
+		}
 		m.isStreaming = false
-		// Save completed generation to history
-		m.messages = append(m.messages, llm.Message{
-			Role:    llm.RoleAssistant,
-			Content: m.currentGen.String(),
-		})
 		m.currentGen.Reset()
 		m.updateViewport()
-		m.viewport.GotoBottom()
+		return m, nil
+
+	case streamErrorMsg:
+		slog.Error("TUI received streamError", "error", msg.err)
+		m.isStreaming = false
+		m.err = msg.err
+		m.addToChatHistory("")
+		m.addToChatHistory(errorStyle.Render(fmt.Sprintf("✗ Error: %v", msg.err)))
+		m.currentGen.Reset()
+		m.updateViewport()
 		return m, nil
 
 	case toolCallMsg:
-		m.isStreaming = false
-		// We execute the tool directly here for simplicity if not requiring approval.
-		// (A full implementation would pause and render an approval modal first, but
-		// we will auto-approve for brevity here unless building a complex policy tree).
+		m.pendingToolMsg = &msg
+		return m, m.executeTool(msg)
 
-		tool, ok := m.registry.Get(msg.ToolName)
-		if !ok {
-			m.err = fmt.Errorf("LLM tried to use unknown tool: %s", msg.ToolName)
-			m.updateViewport()
-			return m, nil
+	case toolResultMsg:
+		m.pendingToolMsg = nil
+		
+		if msg.Error != nil {
+			// Tool failed - show error and continue with text response
+			m.addToChatHistory(errorStyle.Render(fmt.Sprintf("❌ Error: %v", msg.Error)))
+			m.messages = append(m.messages, llm.Message{
+				Role:    llm.RoleUser,
+				Content: fmt.Sprintf("[Tool Error]\n%v", msg.Error),
+			})
+		} else {
+			// Tool succeeded - don't show raw result, let model explain it
+			m.addToChatHistory(dimStyle.Render("✓ Done"))
+			m.messages = append(m.messages, llm.Message{
+				Role:    llm.RoleUser,
+				Content: fmt.Sprintf("[Tool Result]\n%s", msg.Result),
+			})
 		}
 
-		m.messages = append(m.messages, llm.Message{
-			Role:    llm.RoleAssistant,
-			Content: "",
-			ToolCalls: []llm.ToolCall{
-				{
-					Function: llm.FunctionCall{
-						Name:      msg.ToolName,
-						Arguments: msg.Args,
-					},
-				},
-			},
-		})
-
-		// Sandbox Execution
-		resultContext := fmt.Sprintf("\n[Executing %s...]\n", tool.Name())
-		m.currentGen.WriteString(resultContext)
 		m.updateViewport()
-
-		// Real sandbox execution
-		execResult, err := tool.Execute(m.ctx, json.RawMessage(msg.Args))
-		if err != nil {
-			execResult = fmt.Sprintf("Error executing tool: %v", err)
-		}
-
-		m.messages = append(m.messages, llm.Message{
-			Role:    "tool",
-			Content: execResult,
-		})
-
-		// Send the tool output back into the generation loop
+		
+		// Continue with text response (tools disabled to avoid loops)
 		m.isStreaming = true
-		m.currentGen.WriteString(fmt.Sprintf("[Result appended via tool: %s]\n", tool.Name()))
-		m.updateViewport()
-
-		return m, m.generateResponse()
-
-	case streamErrorMsg:
-		m.isStreaming = false
-		m.err = msg.err
-		m.currentGen.Reset()
-		m.updateViewport()
-		m.viewport.GotoBottom()
-		return m, nil
+		return m, tea.Batch(m.generateResponseWithoutTools(), m.spinner.Tick)
 	}
 
-	return m, tea.Batch(tiCmd, vpCmd)
+	return m, tea.Batch(tiCmd, vpCmd, spCmd)
 }
 
-// generateResponse invokes the LLM Provider and returns the initial token pipeline command
+func (m *chatModel) View() string {
+	header := titleStyle.Render(fmt.Sprintf(" Neuron CLI (%s) ", m.modelID))
+
+	var status string
+	if m.isStreaming {
+		status = fmt.Sprintf("%s Thinking...", m.spinner.View())
+	} else if m.pendingToolMsg != nil {
+		status = fmt.Sprintf("%s Executing %s...", m.spinner.View(), m.pendingToolMsg.ToolName)
+	} else {
+		status = dimStyle.Render("● Ready")
+	}
+
+	footer := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#6272A4")).
+		Padding(0, 1).
+		Render(m.textarea.View())
+
+	help := dimStyle.Render("Enter: send • Ctrl+C: quit")
+
+	return fmt.Sprintf("%s\n%s\n\n%s\n%s\n%s",
+		header,
+		status,
+		m.viewport.View(),
+		footer,
+		help,
+	)
+}
+
+func (m *chatModel) handleUserMessage(text string) {
+	slog.Info("User message received", "text", text)
+	
+	m.messages = append(m.messages, llm.Message{
+		Role:    llm.RoleUser,
+		Content: text,
+	})
+
+	m.addToChatHistory("")
+	m.addToChatHistory(userStyle.Render("You:"))
+	m.addToChatHistory(text)
+
+	m.isStreaming = true
+	m.currentGen.Reset()
+	m.err = nil
+	m.updateViewport()
+}
+
+func (m *chatModel) generateResponseWithoutTools() tea.Cmd {
+	slog.Info("Generating LLM response without tools", "message_count", len(m.messages))
+
+	req := llm.CompletionRequest{
+		Model:    m.modelID,
+		Messages: m.messages,
+		Stream:   true,
+		Tools:    nil, // No tools - force text response
+	}
+
+	m.tokenChan, m.errChan = m.provider.GenerateStream(m.ctx, req)
+	slog.Debug("Stream channels created")
+	return tea.Batch(m.waitForNextToken(), m.spinner.Tick)
+}
+
 func (m *chatModel) generateResponse() tea.Cmd {
+	slog.Info("Generating LLM response", "message_count", len(m.messages))
+	
 	toolDefs := m.registry.GetDefinitions()
 	var llmTools []llm.Definition
 	for _, def := range toolDefs {
@@ -250,6 +356,8 @@ func (m *chatModel) generateResponse() tea.Cmd {
 		})
 	}
 
+	slog.Debug("Tools available", "count", len(llmTools))
+
 	req := llm.CompletionRequest{
 		Model:    m.modelID,
 		Messages: m.messages,
@@ -257,101 +365,77 @@ func (m *chatModel) generateResponse() tea.Cmd {
 		Tools:    llmTools,
 	}
 
-	tokenChan, errChan := m.provider.GenerateStream(m.ctx, req)
-
-	// We return a command that reads the first token from the channel
-	return waitForNextToken(tokenChan, errChan)
+	m.tokenChan, m.errChan = m.provider.GenerateStream(m.ctx, req)
+	slog.Debug("Stream channels created")
+	return m.waitForNextToken()
 }
 
-// waitForNextToken is recursively called after each token update to pull the next
-// token from the channel into the Bubbletea event loop.
-func waitForNextToken(tokenChan <-chan string, errChan <-chan error) tea.Cmd {
+func (m *chatModel) waitForNextToken() tea.Cmd {
 	return func() tea.Msg {
 		select {
-		case err := <-errChan:
-			if err != nil {
-				return streamErrorMsg{err}
-			}
-			return streamDoneMsg{}
-		case token, ok := <-tokenChan:
+		case <-m.ctx.Done():
+			slog.Error("Context cancelled")
+			return streamErrorMsg{err: m.ctx.Err()}
+		case token, ok := <-m.tokenChan:
 			if !ok {
-				// Channel closed, check for final errors
+				// Token channel closed, check for errors
 				select {
-				case err := <-errChan:
-					if err != nil {
+				case err, ok := <-m.errChan:
+					if ok && err != nil {
+						slog.Error("Stream error after tokens", "error", err)
 						return streamErrorMsg{err}
 					}
 				default:
 				}
+				slog.Debug("Token channel closed, stream done")
 				return streamDoneMsg{}
 			}
-			// We received a token, we must return a command containing the token AND the channels
-			// so the Update loop can recurse.
-			return tokenResponseMsg{
-				token:     token,
-				tokenChan: tokenChan,
-				errChan:   errChan,
-			}
+			slog.Debug("Token received", "token", token)
+			return tokenMsg(token)
 		}
 	}
 }
 
-type tokenResponseMsg struct {
-	token     string
-	tokenChan <-chan string
-	errChan   <-chan error
+func (m *chatModel) executeTool(msg toolCallMsg) tea.Cmd {
+	return func() tea.Msg {
+		tool, ok := m.registry.Get(msg.ToolName)
+		if !ok {
+			return toolResultMsg{Error: fmt.Errorf("tool not found: %s", msg.ToolName)}
+		}
+
+		m.addToChatHistory("")
+		m.addToChatHistory(toolStyle.Render(fmt.Sprintf("🔧 %s...", tool.Name())))
+		m.updateViewport()
+
+		result, err := tool.Execute(m.ctx, msg.Args)
+		return toolResultMsg{Result: result, Error: err}
+	}
+}
+
+func (m *chatModel) addToChatHistory(line string) {
+	m.chatHistory.WriteString(line)
+	m.chatHistory.WriteString("\n")
 }
 
 func (m *chatModel) updateViewport() {
-	var sb strings.Builder
-
-	// Render conversation history
-	for _, msg := range m.messages {
-		if msg.Role == llm.RoleUser {
-			sb.WriteString(userRoleStyle.Render("You\n"))
-		} else {
-			sb.WriteString(assistantRoleStyle.Render("Neuron\n"))
-		}
-		sb.WriteString(msg.Content + "\n")
-	}
-
-	// Render the currently generating stream
-	if m.isStreaming {
-		sb.WriteString(assistantRoleStyle.Render("Neuron\n"))
-		sb.WriteString(m.currentGen.String() + "█\n")
-	}
-
-	// Render any stream errors
-	if m.err != nil {
-		sb.WriteString(errorStyle.Render(fmt.Sprintf("\n[Error: %v]\n", m.err)))
-	}
-
-	m.viewport.SetContent(sb.String())
+	m.viewport.SetContent(m.chatHistory.String())
+	m.viewport.GotoBottom()
 }
 
-func (m *chatModel) View() string {
-	header := titleStyle.Render(fmt.Sprintf(" Neuron CLI (%s) ", m.modelID))
-
-	historyView := m.viewport.View()
-
-	inputLabel := "  "
-	if m.isStreaming {
-		inputLabel = "░ "
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
 	}
-
-	return fmt.Sprintf(
-		"%s\n%s\n\n%s%s",
-		header,
-		historyView,
-		inputLabel,
-		m.textarea.View(),
-	)
+	return s[:maxLen] + "..."
 }
 
-// Run is the main entrypoint called by the Cobra command.
+// Run starts the TUI application
 func Run(provider llm.Provider, modelID string, registry *tools.Registry) error {
-	m := InitialModel(provider, modelID, registry)
-	p := tea.NewProgram(&m, tea.WithAltScreen())
+	p := tea.NewProgram(
+		InitialModel(provider, modelID, registry),
+		tea.WithAltScreen(),
+	)
+
 	_, err := p.Run()
 	return err
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 )
 
@@ -35,10 +36,10 @@ type ollamaChatRequest struct {
 }
 
 type ollamaChatResponse struct {
-	Model     string  `json:"model"`
-	Message   Message `json:"message"`
-	Done      bool    `json:"done"`
-	Error     string  `json:"error,omitempty"`
+	Model   string  `json:"model"`
+	Message Message `json:"message"`
+	Done    bool    `json:"done"`
+	Error   string  `json:"error,omitempty"`
 }
 
 // Preflight checks if Ollama is running and the model is available locally.
@@ -55,12 +56,51 @@ func (p *OllamaProvider) Preflight(ctx context.Context, model string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ollama returned unexpected status: %s", resp.Status)
+		return p.handleError(resp)
 	}
 
-	// For a robust implementation, we would parse the JSON and check if `model` exists
-	// in the `models` array. For now, returning nil means Ollama is mostly healthy.
-	return nil
+	var tags struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return fmt.Errorf("failed to decode tags: %w", err)
+	}
+
+	for _, m := range tags.Models {
+		if m.Name == model {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("model %q not found in Ollama. Please run 'ollama pull %s' to download it", model, model)
+}
+
+func (p *OllamaProvider) handleError(resp *http.Response) error {
+	var ollamaErr struct {
+		Error string `json:"error"`
+	}
+
+	// Try to decode error message from body
+	_ = json.NewDecoder(resp.Body).Decode(&ollamaErr)
+
+	msg := ollamaErr.Error
+	if msg == "" {
+		msg = resp.Status
+	}
+
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		return fmt.Errorf("Ollama model not found or URL incorrect (404). Details: %s", msg)
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("Ollama authentication error (403/401). Details: %s", msg)
+	case http.StatusInternalServerError:
+		return fmt.Errorf("Ollama internal server error (500). Details: %s", msg)
+	default:
+		return fmt.Errorf("Ollama returned error (status %d): %s", resp.StatusCode, msg)
+	}
 }
 
 // Generate makes a non-streaming chat completion request.
@@ -92,6 +132,10 @@ func (p *OllamaProvider) Generate(ctx context.Context, req CompletionRequest) (s
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return "", p.handleError(resp)
+	}
+
 	var ollamaResp ollamaChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
 		return "", fmt.Errorf("failed to decode response: %w", err)
@@ -109,6 +153,8 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req CompletionReque
 	tokenChan := make(chan string)
 	errChan := make(chan error, 1)
 
+	slog.Info("Starting Ollama stream", "model", req.Model, "messages", len(req.Messages), "tools", len(req.Tools))
+
 	go func() {
 		defer close(tokenChan)
 		defer close(errChan)
@@ -125,12 +171,16 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req CompletionReque
 
 		body, err := json.Marshal(ollamaReq)
 		if err != nil {
+			slog.Error("Failed to marshal request", "error", err)
 			errChan <- fmt.Errorf("failed to marshal streaming request: %w", err)
 			return
 		}
 
+		slog.Debug("Request body", "body", string(body))
+
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/api/chat", bytes.NewReader(body))
 		if err != nil {
+			slog.Error("Failed to create HTTP request", "error", err)
 			errChan <- err
 			return
 		}
@@ -138,50 +188,80 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req CompletionReque
 
 		resp, err := p.HTTPClient.Do(httpReq)
 		if err != nil {
+			slog.Error("HTTP request failed", "error", err)
 			errChan <- err
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			errChan <- fmt.Errorf("ollama backend error, status: %d", resp.StatusCode)
+			slog.Error("Ollama returned error status", "status", resp.StatusCode)
+			errChan <- p.handleError(resp)
 			return
 		}
 
+		slog.Debug("Stream started, reading chunks")
 		scanner := bufio.NewScanner(resp.Body)
+		chunkCount := 0
+		var collectedToolCalls []ToolCall
+		
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if len(line) == 0 {
 				continue
 			}
 
+			chunkCount++
+			slog.Debug("Received chunk", "count", chunkCount, "line", string(line))
+
 			var chunk ollamaChatResponse
 			if err := json.Unmarshal(line, &chunk); err != nil {
+				slog.Error("Failed to decode chunk", "error", err, "line", string(line))
 				errChan <- fmt.Errorf("failed to decode chunk: %w", err)
 				return
 			}
 
 			if chunk.Error != "" {
+				slog.Error("Ollama returned error", "error", chunk.Error)
 				errChan <- fmt.Errorf("ollama stream error: %s", chunk.Error)
 				return
 			}
 
+			// Collect tool calls
+			if len(chunk.Message.ToolCalls) > 0 {
+				collectedToolCalls = append(collectedToolCalls, chunk.Message.ToolCalls...)
+				slog.Info("Tool calls detected", "count", len(chunk.Message.ToolCalls))
+			}
+
 			// Send the incremental token text (if any)
 			if chunk.Message.Content != "" {
-				// Don't block forever if context is canceled
+				slog.Debug("Sending token", "content", chunk.Message.Content)
 				select {
 				case <-ctx.Done():
+					slog.Debug("Context cancelled, stopping stream")
 					return
 				case tokenChan <- chunk.Message.Content:
 				}
 			}
 
 			if chunk.Done {
+				// If we have tool calls but no content, send tool call info as special message
+				if len(collectedToolCalls) > 0 && chunk.Message.Content == "" {
+					slog.Info("Stream completed with tool calls", "tool_count", len(collectedToolCalls))
+					// Send a special marker for tool calls
+					toolCallJSON, _ := json.Marshal(collectedToolCalls)
+					select {
+					case tokenChan <- fmt.Sprintf("__TOOL_CALL__%s", string(toolCallJSON)):
+					default:
+					}
+				}
+				slog.Info("Stream completed", "total_chunks", chunkCount)
 				return
 			}
 		}
 
 		if err := scanner.Err(); err != nil {
+			slog.Error("Scanner error", "error", err)
 			errChan <- err
 		}
 	}()

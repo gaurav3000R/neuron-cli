@@ -26,8 +26,8 @@ type ToolCall struct {
 }
 
 type FunctionCall struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
 }
 
 // CompletionRequest represents the input parameters for an LLM generation.

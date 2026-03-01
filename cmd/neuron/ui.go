@@ -27,8 +27,8 @@ of the terminal.`,
 
 		err := provider.Preflight(ctx, model)
 		if err != nil {
-			fmt.Printf("[Error] Cannot reach Ollama at %s.\n", baseURL)
-			fmt.Printf("Make sure Ollama is running (`ollama serve`).\nDetails: %v\n", err)
+			fmt.Printf("❌ Preflight check failed for model %q at %s\n", model, baseURL)
+			fmt.Printf("Details: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -38,8 +38,18 @@ of the terminal.`,
 		registry.Register(&tools.ShellTool{})
 
 		port := 3133
+		fmt.Printf("🚀 Starting Neuron Web UI on http://localhost:%d\n", port)
+		fmt.Printf("💡 Press Ctrl+C to stop the server\n\n")
+		
 		if err := ui.StartServer(port, provider, registry, model); err != nil {
-			fmt.Printf("Web Server crashed: %v\n", err)
+			if err.Error() == "listen tcp 127.0.0.1:3133: bind: address already in use" || 
+			   err.Error() == "listen tcp [::1]:3133: bind: address already in use" {
+				fmt.Printf("❌ Port %d is already in use\n", port)
+				fmt.Printf("💡 Kill the existing process with: lsof -ti:%d | xargs kill -9\n", port)
+				fmt.Printf("   Or run: npm run kill\n")
+			} else {
+				fmt.Printf("❌ Web Server crashed: %v\n", err)
+			}
 			os.Exit(1)
 		}
 	},

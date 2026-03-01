@@ -6,18 +6,19 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gaurav3000R/neuron-cli/internal/logger"
 	"github.com/spf13/viper"
 )
 
 // AppConfig represents the root configuration structure.
 type AppConfig struct {
 	LLM struct {
-		Provider       string `mapstructure:"provider"` // e.g., "ollama", "openai"
-		DefaultModel   string `mapstructure:"default_model"`
-		BaseURL        string `mapstructure:"base_url"` // e.g., "http://localhost:11434"
-		PreferLocal    bool   `mapstructure:"prefer_local"`
+		Provider     string `mapstructure:"provider"` // e.g., "ollama", "openai"
+		DefaultModel string `mapstructure:"default_model"`
+		BaseURL      string `mapstructure:"base_url"` // e.g., "http://localhost:11434"
+		PreferLocal  bool   `mapstructure:"prefer_local"`
 	} `mapstructure:"llm"`
-	
+
 	Sandbox struct {
 		Policy string `mapstructure:"policy"` // "default", "auto_edit", "plan"
 		Type   string `mapstructure:"type"`   // "none", "docker"
@@ -50,7 +51,7 @@ func InitConfig() {
 	viper.SetDefault("llm.default_model", "llama3")
 	viper.SetDefault("llm.base_url", "http://localhost:11434")
 	viper.SetDefault("llm.prefer_local", true)
-	
+
 	viper.SetDefault("sandbox.policy", "default")
 	viper.SetDefault("sandbox.type", "none")
 
@@ -79,17 +80,22 @@ func InitConfig() {
 	}
 }
 
-// SetupLogger configures the default slog logger.
+// SetupLogger configures the default slog logger using the new logger module.
 func SetupLogger(verbose bool) {
-	opts := &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}
-	if verbose {
-		opts.Level = slog.LevelDebug
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
 	}
 
-	// Use text handler for now; could switch to JSON for background processes later
-	handler := slog.NewTextHandler(os.Stderr, opts)
-	logger := slog.New(handler)
-	slog.SetDefault(logger)
+	logDir := filepath.Join(home, ".config", "neuron")
+	jsonLogFile := filepath.Join(logDir, "neuron.json.log")
+	prettyLogFile := filepath.Join(logDir, "neuron.log")
+
+	// 1. Setup JSON logging to file for deep micro-debugging
+	// 2. Setup Pretty (Colorized) logging to file only (NO terminal output to avoid breaking TUI)
+	err = logger.SetupMulti(verbose, jsonLogFile, prettyLogFile, nil)
+	if err != nil {
+		// Fallback to basic logging if setup fails
+		// Don't use slog.Error here as it might not be initialized yet
+	}
 }

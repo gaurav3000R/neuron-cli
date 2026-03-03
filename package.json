@@ -12,6 +12,7 @@
     "build:go": "go build -o bin/neuron cmd/neuron/*.go",
     "start": "npm run ui",
     "chat": "go run cmd/neuron/*.go chat",
+    "chat:gemma": "go run cmd/neuron/*.go chat -m gemma3",
     "ui": "go run cmd/neuron/*.go ui",
     "cli:run": "go run cmd/neuron/*.go run",
     "cli:config": "go run cmd/neuron/*.go config",

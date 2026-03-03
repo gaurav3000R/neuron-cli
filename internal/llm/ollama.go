@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 )
 
 // OllamaProvider implements the Provider interface for the Ollama API.
@@ -69,13 +70,33 @@ func (p *OllamaProvider) Preflight(ctx context.Context, model string) error {
 		return fmt.Errorf("failed to decode tags: %w", err)
 	}
 
+	// Try exact match, then match with :latest suffix if not provided
 	for _, m := range tags.Models {
 		if m.Name == model {
 			return nil
 		}
 	}
 
+	// Try adding :latest if no tag was provided
+	if !containsTag(model) {
+		modelWithLatest := model + ":latest"
+		for _, m := range tags.Models {
+			if m.Name == modelWithLatest {
+				return nil
+			}
+		}
+	}
+
 	return fmt.Errorf("model %q not found in Ollama. Please run 'ollama pull %s' to download it", model, model)
+}
+
+func containsTag(model string) bool {
+	for i := 0; i < len(model); i++ {
+		if model[i] == ':' {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *OllamaProvider) handleError(resp *http.Response) error {
@@ -103,6 +124,24 @@ func (p *OllamaProvider) handleError(resp *http.Response) error {
 	}
 }
 
+// isToolSupported checks if the model supports the Ollama tools API.
+// llama3 (the original) and gemma3 do not consistently support tools via the API in all versions/variants.
+func isToolSupported(model string) bool {
+	// Exact matches for llama3
+	if model == "llama3" || model == "llama3:latest" || model == "llama3:8b" {
+		return false
+	}
+	// Exact matches for gemma3
+	if model == "gemma3" || model == "gemma3:latest" || strings.HasPrefix(model, "gemma3:") {
+		return false
+	}
+	// Check for llama3 without .1 or .2
+	if strings.HasPrefix(model, "llama3") && !strings.HasPrefix(model, "llama3.1") && !strings.HasPrefix(model, "llama3.2") {
+		return false
+	}
+	return true
+}
+
 // Generate makes a non-streaming chat completion request.
 func (p *OllamaProvider) Generate(ctx context.Context, req CompletionRequest) (string, error) {
 	ollamaReq := ollamaChatRequest{
@@ -111,6 +150,11 @@ func (p *OllamaProvider) Generate(ctx context.Context, req CompletionRequest) (s
 		Stream:   false,
 		Tools:    req.Tools,
 	}
+
+	if !isToolSupported(req.Model) {
+		ollamaReq.Tools = nil
+	}
+
 	if req.JSONMode {
 		ollamaReq.Format = "json"
 	}
@@ -165,6 +209,11 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req CompletionReque
 			Stream:   true,
 			Tools:    req.Tools,
 		}
+
+		if !isToolSupported(req.Model) {
+			ollamaReq.Tools = nil
+		}
+
 		if req.JSONMode {
 			ollamaReq.Format = "json"
 		}
@@ -204,7 +253,7 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req CompletionReque
 		scanner := bufio.NewScanner(resp.Body)
 		chunkCount := 0
 		var collectedToolCalls []ToolCall
-		
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if len(line) == 0 {

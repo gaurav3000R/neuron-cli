@@ -6,7 +6,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var prompt string
+var (
+	prompt   string
+	runModel string
+)
 
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -18,7 +21,14 @@ This is useful for piping input or running CLI scripts.`,
 			fmt.Println("Please provide a prompt using the -p flag.")
 			return
 		}
-		fmt.Printf("Running headless prompt: '%s' (Implementation Pending Phase 2)\n", prompt)
+
+		model := runModel
+		if model == "" {
+			// This would be the logic once implemented
+			// model = viper.GetString("llm.default_model")
+		}
+
+		fmt.Printf("Running headless prompt: '%s' with model '%s' (Implementation Pending Phase 2)\n", prompt, model)
 		// TODO: Pass to raw internal/llm execution mode.
 	},
 }
@@ -26,4 +36,5 @@ This is useful for piping input or running CLI scripts.`,
 func init() {
 	rootCmd.AddCommand(runCmd)
 	runCmd.Flags().StringVarP(&prompt, "prompt", "p", "", "The prompt to run headless")
+	runCmd.Flags().StringVarP(&runModel, "model", "m", "", "The model to use for the headless run")
 }

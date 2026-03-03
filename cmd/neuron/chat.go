@@ -12,6 +12,8 @@ import (
 	"github.com/spf13/viper"
 )
 
+var modelFlag string
+
 var chatCmd = &cobra.Command{
 	Use:   "chat",
 	Short: "Start an interactive chat session",
@@ -25,7 +27,10 @@ chat with the model, run tools, and switch models.`,
 
 func startInteractiveChat() {
 	baseURL := viper.GetString("llm.base_url")
-	model := viper.GetString("llm.default_model")
+	model := modelFlag
+	if model == "" {
+		model = viper.GetString("llm.default_model")
+	}
 
 	provider := llm.NewOllamaProvider(baseURL)
 	ctx := context.Background()
@@ -51,4 +56,5 @@ func startInteractiveChat() {
 
 func init() {
 	rootCmd.AddCommand(chatCmd)
+	chatCmd.Flags().StringVarP(&modelFlag, "model", "m", "", "The model to use for the chat session")
 }

@@ -99,6 +99,10 @@ func containsTag(model string) bool {
 	return false
 }
 
+func (p *OllamaProvider) Name() string {
+	return "Ollama"
+}
+
 func (p *OllamaProvider) handleError(resp *http.Response) error {
 	var ollamaErr struct {
 		Error string `json:"error"`

@@ -170,7 +170,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.frame++
-		return m, tick()
+		return m, tea.Batch(tiCmd, vpCmd, spCmd, tick())
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -180,16 +180,16 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			if m.isStreaming {
-				return m, nil
+				return m, tea.Batch(tiCmd, vpCmd, spCmd)
 			}
 			text := strings.TrimSpace(m.textarea.Value())
 			if text == "" {
-				return m, nil
+				return m, tea.Batch(tiCmd, vpCmd, spCmd)
 			}
 
 			m.textarea.Reset()
 			m.handleUserMessage(text)
-			return m, tea.Batch(m.generateResponse(), m.spinner.Tick)
+			return m, tea.Batch(tiCmd, vpCmd, spCmd, m.generateResponse(), m.spinner.Tick)
 		}
 
 	case tea.WindowSizeMsg:
@@ -201,6 +201,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Height = msg.Height - headerHeight - footerHeight
 		m.textarea.SetWidth(msg.Width - 4)
 		m.updateViewport()
+		return m, tea.Batch(tiCmd, vpCmd, spCmd)
 
 	case tokenMsg:
 		token := string(msg)
@@ -223,7 +224,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				slog.Error("Failed to parse tool calls", "error", err, "json", toolCallJSON)
 				m.addToChatHistory(errorStyle.Render(fmt.Sprintf("Error parsing tool calls: %v", err)))
 				m.updateViewport()
-				return m, nil
+				return m, tea.Batch(tiCmd, vpCmd, spCmd)
 			}
 
 			// Execute the first tool call (handle multiple later)
@@ -238,19 +239,19 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					ToolCalls: toolCalls,
 				})
 
-				return m, m.executeTool(toolCallMsg{
+				return m, tea.Batch(tiCmd, vpCmd, spCmd, m.executeTool(toolCallMsg{
 					ID:       tc.ID,
 					ToolName: tc.Function.Name,
 					Args:     tc.Function.Arguments,
-				})
+				}))
 			}
-			return m, nil
+			return m, tea.Batch(tiCmd, vpCmd, spCmd)
 		}
 
 		// Regular token - add to output
 		m.currentGen.WriteString(token)
 		m.updateViewport()
-		return m, m.waitForNextToken()
+		return m, tea.Batch(tiCmd, vpCmd, spCmd, m.waitForNextToken())
 
 	case streamDoneMsg:
 		slog.Info("TUI received streamDone")
@@ -268,7 +269,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isStreaming = false
 		m.currentGen.Reset()
 		m.updateViewport()
-		return m, nil
+		return m, tea.Batch(tiCmd, vpCmd, spCmd)
 
 	case streamErrorMsg:
 		slog.Error("TUI received streamError", "error", msg.err)
@@ -278,11 +279,11 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addToChatHistory(errorStyle.Render(fmt.Sprintf("✗ Error: %v", msg.err)))
 		m.currentGen.Reset()
 		m.updateViewport()
-		return m, nil
+		return m, tea.Batch(tiCmd, vpCmd, spCmd)
 
 	case toolCallMsg:
 		m.pendingToolMsg = &msg
-		return m, m.executeTool(msg)
+		return m, tea.Batch(tiCmd, vpCmd, spCmd, m.executeTool(msg))
 
 	case toolResultMsg:
 		m.pendingToolMsg = nil
@@ -309,7 +310,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Continue with text response (tools disabled to avoid loops)
 		m.isStreaming = true
-		return m, tea.Batch(m.generateResponseWithoutTools(), m.spinner.Tick)
+		return m, tea.Batch(tiCmd, vpCmd, spCmd, m.generateResponseWithoutTools(), m.spinner.Tick)
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd, spCmd)
@@ -338,17 +339,26 @@ func (m *chatModel) View() string {
 	)
 
 	var status string
+	modelInfo := fmt.Sprintf("[%s: %s]", m.provider.Name(), m.modelID)
 	if m.isStreaming {
-		status = fmt.Sprintf(" %s Thinking...", m.spinner.View())
+		status = fmt.Sprintf(" %s Thinking... %s", m.spinner.View(), dimStyle.Render(modelInfo))
 	} else if m.pendingToolMsg != nil {
-		status = fmt.Sprintf(" %s Executing %s...", m.spinner.View(), m.pendingToolMsg.ToolName)
+		status = fmt.Sprintf(" %s Executing %s... %s", m.spinner.View(), m.pendingToolMsg.ToolName, dimStyle.Render(modelInfo))
 	} else {
-		status = dimStyle.Render(" ● Ready")
+		status = fmt.Sprintf(" %s %s", dimStyle.Render("● Ready"), dimStyle.Render(modelInfo))
 	}
 
-	// If no messages yet, show the animated banner
+	// If no messages yet (excluding system prompt), show the animated banner
 	var mainView string
-	if len(m.messages) == 0 {
+	hasChatMessages := false
+	for _, msg := range m.messages {
+		if msg.Role == llm.RoleUser || msg.Role == llm.RoleAssistant {
+			hasChatMessages = true
+			break
+		}
+	}
+
+	if !hasChatMessages {
 		banner := getAnimatedBanner(m.frame)
 		welcomeInfo := lipgloss.NewStyle().
 			MarginTop(1).
@@ -357,9 +367,10 @@ func (m *chatModel) View() string {
 			BorderForeground(lipgloss.Color("#44475A")).
 			Render(
 				lipgloss.JoinVertical(lipgloss.Left,
-					infoStyle.Render(fmt.Sprintf("• Model: %s", m.modelID)),
-					dimStyle.Render(fmt.Sprintf("• Tools: %d enabled", len(m.registry.GetAll()))),
-					dimStyle.Render("• System Status: Online"),
+					infoStyle.Render(fmt.Sprintf("• Provider: %s", m.provider.Name())),
+					infoStyle.Render(fmt.Sprintf("• Model:    %s", m.modelID)),
+					dimStyle.Render(fmt.Sprintf("• Tools:    %d enabled", len(m.registry.GetAll()))),
+					dimStyle.Render("• System:   Online"),
 				),
 			)
 

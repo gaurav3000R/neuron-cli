@@ -65,4 +65,7 @@ type Provider interface {
 
 	// Preflight checks if the provider is reachable and the model is available.
 	Preflight(ctx context.Context, model string) error
+
+	// Name returns the name of the provider.
+	Name() string
 }

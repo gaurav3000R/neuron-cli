@@ -1,0 +1,29 @@
+🚀 Want an AI assistant that lives in your Terminal, your Browser, AND your Slack? Meet Neuron. 🧠
+
+I’m building Neuron—a local-first, Go-powered AI CLI that gives you total flexibility in how you work. It’s still under development, but the core "Access Anywhere" vision is already alive!
+
+Whether you're deep in the code or away from your desk, Neuron has an interface for you:
+
+📟 THE INTERFACE OPTIONS:
+✅ TUI (Terminal UI): A beautiful, animated terminal interface for the keyboard-warriors who never want to leave the CLI.
+✅ Web UI: A sleek, dark-mode React app embedded directly into the binary. Just run `neuron ui` and it opens in your browser.
+✅ Slack Bot: Integrated Socket Mode support. Chat with your local LLMs directly from Slack for seamless remote access.
+
+🛠️ CORE FEATURES:
+• Multi-Provider: Switch between local (Ollama) and cloud (OpenAI, Gemini).
+• Agentic Tools: It can read/write files and run shell commands (with your approval!).
+• Private & Secure: Your data stays local by default.
+• Code-Aware: Automatically ingests your project's .cursorrules and READMEs.
+
+🚧 THE FUTURE ROADMAP:
+• 🛠️ Docker Sandboxing: Moving tool execution to isolated containers.
+• 📂 Persistent Sessions: SQLite-backed history for all your chats.
+• 📱 WhatsApp Access: Bringing remote AI assistance to your favorite messaging app.
+• 🔍 Deep Context (RAG): Advanced search for massive codebases.
+
+Neuron isn't just a chatbot; it's a portable, multi-interface brain for your development workflow.
+
+👇 Question for the community:
+Do you prefer staying in the Terminal (TUI) or do you like having a Web UI option for your AI tools? Let's hear your preference!
+
+#BuildInPublic #AI #OpenSource #Golang #CLI #Ollama #SlackBot #TUI #WebUI #RemoteWork #SoftwareEngineering #NeuronCLI

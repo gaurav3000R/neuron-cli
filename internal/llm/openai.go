@@ -12,20 +12,29 @@ import (
 )
 
 type OpenAIProvider struct {
-	BaseURL    string
-	APIKey     string
-	HTTPClient *http.Client
+	BaseURL      string
+	APIKey       string
+	HTTPClient   *http.Client
+	providerName string
 }
 
-func NewOpenAIProvider(baseURL, apiKey string) *OpenAIProvider {
+func NewOpenAIProvider(name, baseURL, apiKey string) *OpenAIProvider {
+	if name == "" {
+		name = "OpenAI"
+	}
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
 	return &OpenAIProvider{
-		BaseURL:    baseURL,
-		APIKey:     apiKey,
-		HTTPClient: &http.Client{},
+		BaseURL:      baseURL,
+		APIKey:       apiKey,
+		HTTPClient:   &http.Client{},
+		providerName: name,
 	}
+}
+
+func (p *OpenAIProvider) Name() string {
+	return p.providerName
 }
 
 type openAIChatRequest struct {

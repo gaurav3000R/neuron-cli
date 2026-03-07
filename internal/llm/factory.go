@@ -18,7 +18,7 @@ func NewProvider(providerName, baseURL, apiKey string) Provider {
 		if apiKey == "" {
 			apiKey = os.Getenv("OPENAI_API_KEY")
 		}
-		return NewOpenAIProvider(baseURL, apiKey)
+		return NewOpenAIProvider("OpenAI", baseURL, apiKey)
 	case "gemini":
 		if baseURL == "" || baseURL == "http://localhost:11434" {
 			// Gemini's OpenAI-compatible endpoint
@@ -27,7 +27,7 @@ func NewProvider(providerName, baseURL, apiKey string) Provider {
 		if apiKey == "" {
 			apiKey = os.Getenv("GEMINI_API_KEY")
 		}
-		return NewOpenAIProvider(baseURL, apiKey)
+		return NewOpenAIProvider("Gemini", baseURL, apiKey)
 	case "huggingface", "hf":
 		if baseURL == "" || baseURL == "http://localhost:11434" {
 			// HuggingFace's OpenAI-compatible endpoint for serverless inference
@@ -39,7 +39,14 @@ func NewProvider(providerName, baseURL, apiKey string) Provider {
 				apiKey = os.Getenv("HF_TOKEN")
 			}
 		}
-		return NewOpenAIProvider(baseURL, apiKey)
+		return NewOpenAIProvider("HuggingFace", baseURL, apiKey)
+	case "local":
+		// Generic OpenAI-compatible local provider (LM Studio, LocalAI, vLLM, etc.)
+		if baseURL == "" || baseURL == "http://localhost:11434" {
+			// Default to a common local OpenAI-compatible port (e.g., LM Studio/LocalAI)
+			baseURL = "http://localhost:1234/v1"
+		}
+		return NewOpenAIProvider("Local", baseURL, apiKey)
 	case "ollama":
 		fallthrough
 	default: // default to ollama

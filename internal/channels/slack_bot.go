@@ -66,6 +66,7 @@ func (s *SlackChannel) handleSlackMessage(ctx context.Context, client *slack.Cli
 
 	// Clean up user mention if it exists
 	text = strings.TrimSpace(text)
+	slog.Info("Processing Slack message", "threadID", threadID, "text", text)
 
 	s.sessions.AppendHistory(threadID, llm.Message{Role: llm.RoleUser, Content: text})
 
@@ -99,9 +100,7 @@ func (s *SlackChannel) handleSlackMessage(ctx context.Context, client *slack.Cli
 			})
 		}
 
-		if depth > 0 {
-			llmTools = nil
-		}
+		// We allow tools at all depths as long as depth <= 3
 
 		compReq := llm.CompletionRequest{
 			Model:    s.modelID,
@@ -110,6 +109,7 @@ func (s *SlackChannel) handleSlackMessage(ctx context.Context, client *slack.Cli
 			Tools:    llmTools,
 		}
 
+		slog.Info("Requesting LLM generation", "model", s.modelID, "depth", depth, "toolCount", len(llmTools))
 		tokenChan, errChan := s.provider.GenerateStream(botCtx, compReq)
 		var fullResponse string
 		var errorMessage string
@@ -129,6 +129,7 @@ func (s *SlackChannel) handleSlackMessage(ctx context.Context, client *slack.Cli
 
 					if !toolCallRequested && fullResponse != "" {
 						// Send final text
+						slog.Info("Assistant response complete", "threadID", threadID, "length", len(fullResponse))
 						s.sessions.AppendHistory(threadID, llm.Message{Role: llm.RoleAssistant, Content: fullResponse})
 						client.PostMessage(channel, slack.MsgOptionText(fullResponse, false), slack.MsgOptionTS(threadTS))
 					}
@@ -149,6 +150,7 @@ func (s *SlackChannel) handleSlackMessage(ctx context.Context, client *slack.Cli
 						tc := toolCalls[0]
 						tool, ok := s.registry.Get(tc.Function.Name)
 						if ok {
+							slog.Info("Executing tool from Slack", "name", tc.Function.Name, "args", string(tc.Function.Arguments))
 							client.PostMessage(channel, slack.MsgOptionText(fmt.Sprintf("🔧 Running tool `%s`...", tc.Function.Name), false), slack.MsgOptionTS(threadTS))
 
 							result, err := tool.Execute(botCtx, tc.Function.Arguments)
@@ -160,11 +162,13 @@ func (s *SlackChannel) handleSlackMessage(ctx context.Context, client *slack.Cli
 							})
 
 							if err != nil {
+								slog.Error("Tool execution failed", "tool", tc.Function.Name, "error", err)
 								history = append(history, llm.Message{
 									Role:    llm.RoleUser,
 									Content: fmt.Sprintf("[Tool Error]\n%v", err),
 								})
 							} else {
+								slog.Info("Tool execution success", "tool", tc.Function.Name, "resultLength", len(result))
 								history = append(history, llm.Message{
 									Role:    llm.RoleUser,
 									Content: fmt.Sprintf("[Tool Result]\n%s", result),
@@ -174,6 +178,7 @@ func (s *SlackChannel) handleSlackMessage(ctx context.Context, client *slack.Cli
 							process(history, depth+1)
 							return
 						} else {
+							slog.Warn("Unknown tool requested", "name", tc.Function.Name)
 							client.PostMessage(channel, slack.MsgOptionText(fmt.Sprintf("❌ Tool '%s' not found", tc.Function.Name), false), slack.MsgOptionTS(threadTS))
 							return
 						}

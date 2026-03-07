@@ -13,6 +13,7 @@ import (
 )
 
 var modelFlag string
+var providerFlag string
 
 var chatCmd = &cobra.Command{
 	Use:   "chat",
@@ -32,14 +33,24 @@ func startInteractiveChat() {
 		model = viper.GetString("llm.default_model")
 	}
 
-	provider := llm.NewOllamaProvider(baseURL)
+	providerName := providerFlag
+	if providerName == "" {
+		providerName = viper.GetString("llm.provider")
+	}
+	apiKey := viper.GetString("llm.api_key")
+
+	provider := llm.NewProvider(providerName, baseURL, apiKey)
 	ctx := context.Background()
 
 	err := provider.Preflight(ctx, model)
 	if err != nil {
 		fmt.Printf("❌ Preflight check failed for model %q at %s\n", model, baseURL)
 		fmt.Printf("Details: %v\n", err)
-		fmt.Printf("\n💡 Make sure Ollama is running: ollama serve\n")
+		if providerName == "ollama" || providerName == "" {
+			fmt.Printf("\n💡 Make sure Ollama is running: ollama serve\n")
+		} else {
+			fmt.Printf("\n💡 Make sure your API key is configured correctly in ~/.config/neuron/config.yaml or NEURON_LLM_API_KEY env var.\n")
+		}
 		os.Exit(1)
 	}
 
@@ -57,4 +68,5 @@ func startInteractiveChat() {
 func init() {
 	rootCmd.AddCommand(chatCmd)
 	chatCmd.Flags().StringVarP(&modelFlag, "model", "m", "", "The model to use for the chat session")
+	chatCmd.Flags().StringVarP(&providerFlag, "provider", "p", "", "The provider to use (ollama, openai, gemini, huggingface)")
 }

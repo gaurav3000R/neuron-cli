@@ -12,6 +12,7 @@ const (
 	RoleSystem    MessageRole = "system"
 	RoleUser      MessageRole = "user"
 	RoleAssistant MessageRole = "assistant"
+	RoleTool      MessageRole = "tool"
 )
 
 // Message represent a single chat message
@@ -19,9 +20,12 @@ type Message struct {
 	Role       MessageRole `json:"role"`
 	Content    string      `json:"content"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
 }
 
 type ToolCall struct {
+	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
 	Function FunctionCall `json:"function"`
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -14,23 +15,34 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/gaurav3000R/neuron-cli/internal/llm"
+	"github.com/gaurav3000R/neuron-cli/internal/skills"
 	"github.com/gaurav3000R/neuron-cli/internal/tools"
 )
 
 var (
-	titleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFDF5")).
-			Background(lipgloss.Color("#25A065")).
-			Padding(0, 1).
-			Bold(true)
+	brandStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#BD93F9")).
+			Bold(true).
+			SetString("✧ NEURON")
+
+	managedByStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#6272A4")).
+			Bold(true).
+			Italic(true).
+			SetString("managed by GAURAV")
+
+	headerStyle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, false, true, false).
+			BorderForeground(lipgloss.Color("#44475A")).
+			MarginBottom(1)
 
 	userStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#00D9FF")).
+			Foreground(lipgloss.Color("#8BE9FD")).
 			Bold(true)
 
 	assistantStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#50FA7B")).
-				Bold(true)
+			Foreground(lipgloss.Color("#50FA7B")).
+			Bold(true)
 
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FF5555")).
@@ -42,19 +54,25 @@ var (
 	toolStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFB86C")).
 			Italic(true)
+
+	infoStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#BD93F9"))
 )
 
 // Messages for bubbletea
 type tokenMsg string
+type tickMsg time.Time
 type streamDoneMsg struct{}
 type streamErrorMsg struct{ err error }
 type toolCallMsg struct {
+	ID       string
 	ToolName string
 	Args     json.RawMessage
 }
 type toolResultMsg struct {
-	Result string
-	Error  error
+	ToolCallID string
+	Result     string
+	Error      error
 }
 
 // chatModel implements tea.Model
@@ -79,6 +97,16 @@ type chatModel struct {
 	err    error
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	width  int
+	height int
+	frame  int
+}
+
+func tick() tea.Cmd {
+	return tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
 }
 
 // InitialModel configures the starting state of the TUI.
@@ -86,7 +114,7 @@ func InitialModel(provider llm.Provider, modelID string, registry *tools.Registr
 	ta := textarea.New()
 	ta.Placeholder = "Type your message and press Enter..."
 	ta.Focus()
-	ta.Prompt = "│ "
+	ta.Prompt = "┃ "
 	ta.CharLimit = 8192
 	ta.SetWidth(80)
 	ta.SetHeight(3)
@@ -113,18 +141,18 @@ func InitialModel(provider llm.Provider, modelID string, registry *tools.Registr
 		cancel:   cancel,
 	}
 
-	m.addToChatHistory(dimStyle.Render("╭─ Welcome to Neuron CLI ─╮"))
-	m.addToChatHistory(dimStyle.Render(fmt.Sprintf("│ Model: %s", modelID)))
-	m.addToChatHistory(dimStyle.Render(fmt.Sprintf("│ Tools: %d available", len(registry.GetAll()))))
-	m.addToChatHistory(dimStyle.Render("╰───────────────────────────╯"))
-	m.addToChatHistory("")
+	sysCtx := skills.LoadContext()
+	if sysCtx != "" {
+		m.messages = append(m.messages, llm.Message{Role: llm.RoleSystem, Content: sysCtx})
+	}
+
 	m.updateViewport()
 
 	return m
 }
 
 func (m *chatModel) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, m.spinner.Tick)
+	return tea.Batch(textarea.Blink, m.spinner.Tick, tick())
 }
 
 func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -139,6 +167,10 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.spinner, spCmd = m.spinner.Update(msg)
 
 	switch msg := msg.(type) {
+
+	case tickMsg:
+		m.frame++
+		return m, tick()
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -161,29 +193,31 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
 		m.viewport.Width = msg.Width
 		headerHeight := 4
-		footerHeight := 6
+		footerHeight := 8
 		m.viewport.Height = msg.Height - headerHeight - footerHeight
 		m.textarea.SetWidth(msg.Width - 4)
 		m.updateViewport()
 
 	case tokenMsg:
 		token := string(msg)
-		
-		// Log the exact token for debugging  
+
+		// Log the exact token for debugging
 		prefix := token
 		if len(token) > 20 {
 			prefix = token[:20]
 		}
 		slog.Info("TUI received token", "token_prefix", prefix, "length", len(token))
-		
+
 		// Check for tool call marker using strings.HasPrefix
 		if strings.HasPrefix(token, "__TOOL_CALL__") {
 			slog.Info("TUI detected tool call marker - processing")
 			toolCallJSON := strings.TrimPrefix(token, "__TOOL_CALL__")
 			slog.Debug("Tool call JSON", "json", toolCallJSON)
-			
+
 			var toolCalls []llm.ToolCall
 			if err := json.Unmarshal([]byte(toolCallJSON), &toolCalls); err != nil {
 				slog.Error("Failed to parse tool calls", "error", err, "json", toolCallJSON)
@@ -191,27 +225,28 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateViewport()
 				return m, nil
 			}
-			
+
 			// Execute the first tool call (handle multiple later)
 			if len(toolCalls) > 0 {
 				tc := toolCalls[0]
-				slog.Info("Executing tool", "name", tc.Function.Name, "args", string(tc.Function.Arguments))
-				
+				slog.Info("Executing tool", "name", tc.Function.Name, "args", string(tc.Function.Arguments), "id", tc.ID)
+
 				// Add tool call to message history
 				m.messages = append(m.messages, llm.Message{
-					Role:     llm.RoleAssistant,
-					Content:  "",
+					Role:      llm.RoleAssistant,
+					Content:   "",
 					ToolCalls: toolCalls,
 				})
-				
+
 				return m, m.executeTool(toolCallMsg{
+					ID:       tc.ID,
 					ToolName: tc.Function.Name,
 					Args:     tc.Function.Arguments,
 				})
 			}
 			return m, nil
 		}
-		
+
 		// Regular token - add to output
 		m.currentGen.WriteString(token)
 		m.updateViewport()
@@ -251,25 +286,27 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case toolResultMsg:
 		m.pendingToolMsg = nil
-		
+
 		if msg.Error != nil {
 			// Tool failed - show error and continue with text response
 			m.addToChatHistory(errorStyle.Render(fmt.Sprintf("❌ Error: %v", msg.Error)))
 			m.messages = append(m.messages, llm.Message{
-				Role:    llm.RoleUser,
-				Content: fmt.Sprintf("[Tool Error]\n%v", msg.Error),
+				Role:       llm.RoleTool,
+				Content:    fmt.Sprintf("Error: %v", msg.Error),
+				ToolCallID: msg.ToolCallID,
 			})
 		} else {
 			// Tool succeeded - don't show raw result, let model explain it
 			m.addToChatHistory(dimStyle.Render("✓ Done"))
 			m.messages = append(m.messages, llm.Message{
-				Role:    llm.RoleUser,
-				Content: fmt.Sprintf("[Tool Result]\n%s", msg.Result),
+				Role:       llm.RoleTool,
+				Content:    msg.Result,
+				ToolCallID: msg.ToolCallID,
 			})
 		}
 
 		m.updateViewport()
-		
+
 		// Continue with text response (tools disabled to avoid loops)
 		m.isStreaming = true
 		return m, tea.Batch(m.generateResponseWithoutTools(), m.spinner.Tick)
@@ -279,37 +316,126 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *chatModel) View() string {
-	header := titleStyle.Render(fmt.Sprintf(" Neuron CLI (%s) ", m.modelID))
+	// Animate the brand name in the header
+	brandColors := []string{"#BD93F9", "#8BE9FD", "#FF79C6", "#50FA7B"}
+	brandColor := brandColors[(m.frame/5)%len(brandColors)]
+
+	brand := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(brandColor)).
+		Bold(true).
+		Render(fmt.Sprintf("✧ NEURON"))
+
+	managedBy := managedByStyle.Render()
+
+	gapWidth := m.width - lipgloss.Width(brand) - lipgloss.Width(managedBy) - 2
+	if gapWidth < 0 {
+		gapWidth = 0
+	}
+	gap := strings.Repeat(" ", gapWidth)
+
+	header := headerStyle.Width(m.width).Render(
+		lipgloss.JoinHorizontal(lipgloss.Center, brand, gap, managedBy),
+	)
 
 	var status string
 	if m.isStreaming {
-		status = fmt.Sprintf("%s Thinking...", m.spinner.View())
+		status = fmt.Sprintf(" %s Thinking...", m.spinner.View())
 	} else if m.pendingToolMsg != nil {
-		status = fmt.Sprintf("%s Executing %s...", m.spinner.View(), m.pendingToolMsg.ToolName)
+		status = fmt.Sprintf(" %s Executing %s...", m.spinner.View(), m.pendingToolMsg.ToolName)
 	} else {
-		status = dimStyle.Render("● Ready")
+		status = dimStyle.Render(" ● Ready")
+	}
+
+	// If no messages yet, show the animated banner
+	var mainView string
+	if len(m.messages) == 0 {
+		banner := getAnimatedBanner(m.frame)
+		welcomeInfo := lipgloss.NewStyle().
+			MarginTop(1).
+			Padding(1, 2).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#44475A")).
+			Render(
+				lipgloss.JoinVertical(lipgloss.Left,
+					infoStyle.Render(fmt.Sprintf("• Model: %s", m.modelID)),
+					dimStyle.Render(fmt.Sprintf("• Tools: %d enabled", len(m.registry.GetAll()))),
+					dimStyle.Render("• System Status: Online"),
+				),
+			)
+
+		mainView = lipgloss.Place(m.width, m.viewport.Height,
+			lipgloss.Center, lipgloss.Center,
+			lipgloss.JoinVertical(lipgloss.Center, banner, welcomeInfo),
+		)
+	} else {
+		mainView = m.viewport.View()
 	}
 
 	footer := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#6272A4")).
+		BorderForeground(lipgloss.Color("#44475A")).
 		Padding(0, 1).
 		Render(m.textarea.View())
 
-	help := dimStyle.Render("Enter: send • Ctrl+C: quit")
+	help := dimStyle.Render(" Enter: send • Ctrl+C: quit")
 
-	return fmt.Sprintf("%s\n%s\n\n%s\n%s\n%s",
+	return lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		status,
-		m.viewport.View(),
+		"",
+		mainView,
+		"",
 		footer,
 		help,
 	)
 }
 
+func getAnimatedBanner(frame int) string {
+	lines := []string{
+		"███╗   ██╗███████╗██╗   ██╗██████╗  ██████╗ ██╗   ██╗",
+		"████╗  ██║██╔════╝██║   ██║██╔══██╗██╔═══██╗████╗  ██║",
+		"██╔██╗ ██║█████╗  ██║   ██║██████╔╝██║   ██║██╔██╗ ██║",
+		"██║╚██╗██║██╔══╝  ██║   ██║██╔══██╗██║   ██║██║╚██╗██║",
+		"██║ ╚████║███████╗╚██████╔╝██║  ██║╚██████╔╝██║ ╚████║",
+		"╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝",
+	}
+
+	// Neural connection decorations
+	topDeco := "   ○───✧───●──────────✧──────────●───✧───○"
+	botDeco := "   ○───✧───●──────────✧──────────●───✧───○"
+
+	gradient := []lipgloss.Color{
+		lipgloss.Color("#8BE9FD"), // Cyan
+		lipgloss.Color("#BD93F9"), // Purple
+		lipgloss.Color("#FF79C6"), // Pink
+		lipgloss.Color("#BD93F9"), // Purple
+		lipgloss.Color("#8BE9FD"), // Cyan
+	}
+
+	var styledBanner strings.Builder
+
+	styledBanner.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4")).Render(topDeco) + "\n\n")
+
+	for _, line := range lines {
+		var styledLine strings.Builder
+		runes := []rune(line)
+		for j, r := range runes {
+			// Shift the gradient using the frame counter for a "working" effect
+			colorIdx := ((j + frame) * len(gradient) / 10) % len(gradient)
+			style := lipgloss.NewStyle().Foreground(gradient[colorIdx]).Bold(true)
+			styledLine.WriteString(style.Render(string(r)))
+		}
+		styledBanner.WriteString(styledLine.String() + "\n")
+	}
+
+	styledBanner.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4")).Render(botDeco) + "\n")
+
+	return styledBanner.String()
+}
+
 func (m *chatModel) handleUserMessage(text string) {
 	slog.Info("User message received", "text", text)
-	
+
 	m.messages = append(m.messages, llm.Message{
 		Role:    llm.RoleUser,
 		Content: text,
@@ -342,7 +468,7 @@ func (m *chatModel) generateResponseWithoutTools() tea.Cmd {
 
 func (m *chatModel) generateResponse() tea.Cmd {
 	slog.Info("Generating LLM response", "message_count", len(m.messages))
-	
+
 	toolDefs := m.registry.GetDefinitions()
 	var llmTools []llm.Definition
 	for _, def := range toolDefs {
@@ -400,7 +526,7 @@ func (m *chatModel) executeTool(msg toolCallMsg) tea.Cmd {
 	return func() tea.Msg {
 		tool, ok := m.registry.Get(msg.ToolName)
 		if !ok {
-			return toolResultMsg{Error: fmt.Errorf("tool not found: %s", msg.ToolName)}
+			return toolResultMsg{ToolCallID: msg.ID, Error: fmt.Errorf("tool not found: %s", msg.ToolName)}
 		}
 
 		m.addToChatHistory("")
@@ -408,7 +534,7 @@ func (m *chatModel) executeTool(msg toolCallMsg) tea.Cmd {
 		m.updateViewport()
 
 		result, err := tool.Execute(m.ctx, msg.Args)
-		return toolResultMsg{Result: result, Error: err}
+		return toolResultMsg{ToolCallID: msg.ID, Result: result, Error: err}
 	}
 }
 

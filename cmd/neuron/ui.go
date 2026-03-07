@@ -13,6 +13,7 @@ import (
 )
 
 var uiModelFlag string
+var uiProviderFlag string
 
 var uiCmd = &cobra.Command{
 	Use:   "ui",
@@ -27,13 +28,22 @@ of the terminal.`,
 			model = viper.GetString("llm.default_model")
 		}
 
-		provider := llm.NewOllamaProvider(baseURL)
+		providerName := uiProviderFlag
+		if providerName == "" {
+			providerName = viper.GetString("llm.provider")
+		}
+		apiKey := viper.GetString("llm.api_key")
+
+		provider := llm.NewProvider(providerName, baseURL, apiKey)
 		ctx := context.Background()
 
 		err := provider.Preflight(ctx, model)
 		if err != nil {
 			fmt.Printf("❌ Preflight check failed for model %q at %s\n", model, baseURL)
 			fmt.Printf("Details: %v\n", err)
+			if providerName != "ollama" && providerName != "" {
+				fmt.Printf("\n💡 Make sure your API key is configured correctly in ~/.config/neuron/config.yaml or NEURON_LLM_API_KEY env var.\n")
+			}
 			os.Exit(1)
 		}
 
@@ -63,4 +73,5 @@ of the terminal.`,
 func init() {
 	rootCmd.AddCommand(uiCmd)
 	uiCmd.Flags().StringVarP(&uiModelFlag, "model", "m", "", "The model to use for the UI session")
+	uiCmd.Flags().StringVarP(&uiProviderFlag, "provider", "p", "", "The provider to use (ollama, openai, gemini, huggingface)")
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gaurav3000R/neuron-cli/internal/llm"
+	"github.com/gaurav3000R/neuron-cli/internal/skills"
 	"github.com/gaurav3000R/neuron-cli/internal/tools"
 )
 
@@ -69,6 +70,12 @@ func (s *ChatServer) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+
+	sysCtx := skills.LoadContext()
+	if sysCtx != "" {
+		req.Messages = append([]llm.Message{{Role: llm.RoleSystem, Content: sysCtx}}, req.Messages...)
+	}
+
 	s.runChatStream(ctx, w, flusher, req.Messages)
 }
 
@@ -152,14 +159,14 @@ func (s *ChatServer) runChatStream(ctx context.Context, w http.ResponseWriter, f
 					slog.Info("Web UI detected tool call marker - processing")
 					toolCallJSON := strings.TrimPrefix(token, "__TOOL_CALL__")
 					slog.Debug("Tool call JSON", "json", toolCallJSON)
-					
+
 					var toolCalls []llm.ToolCall
 					if err := json.Unmarshal([]byte(toolCallJSON), &toolCalls); err != nil {
 						slog.Error("Failed to parse tool calls", "error", err, "json", toolCallJSON)
 						sendEvent(fmt.Sprintf("Error parsing tool calls: %v", err), "")
 						return
 					}
-					
+
 					if len(toolCalls) > 0 {
 						// Execute tool
 						tc := toolCalls[0]

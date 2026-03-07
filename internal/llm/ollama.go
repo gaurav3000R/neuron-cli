@@ -278,7 +278,12 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req CompletionReque
 
 			// Collect tool calls
 			if len(chunk.Message.ToolCalls) > 0 {
-				collectedToolCalls = append(collectedToolCalls, chunk.Message.ToolCalls...)
+				for _, tc := range chunk.Message.ToolCalls {
+					if tc.ID == "" {
+						tc.ID = fmt.Sprintf("call_%d", len(collectedToolCalls))
+					}
+					collectedToolCalls = append(collectedToolCalls, tc)
+				}
 				slog.Info("Tool calls detected", "count", len(chunk.Message.ToolCalls))
 			}
 

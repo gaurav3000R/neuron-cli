@@ -7,15 +7,17 @@ import (
 	"strings"
 
 	"github.com/gaurav3000R/neuron-cli/internal/logger"
+	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 )
 
 // AppConfig represents the root configuration structure.
 type AppConfig struct {
 	LLM struct {
-		Provider     string `mapstructure:"provider"` // e.g., "ollama", "openai"
+		Provider     string `mapstructure:"provider"` // e.g., "ollama", "openai", "gemini", "huggingface"
 		DefaultModel string `mapstructure:"default_model"`
 		BaseURL      string `mapstructure:"base_url"` // e.g., "http://localhost:11434"
+		APIKey       string `mapstructure:"api_key"`  // API key for remote providers
 		PreferLocal  bool   `mapstructure:"prefer_local"`
 	} `mapstructure:"llm"`
 
@@ -41,6 +43,12 @@ func InitConfig() {
 		slog.Error("Failed to create config directory", "error", err)
 		os.Exit(1)
 	}
+
+	// Load environment variables from .env files
+	// 1. Load from global config directory first
+	_ = godotenv.Load(filepath.Join(configDir, ".env"))
+	// 2. Load from current directory (local overrides global)
+	_ = godotenv.Load()
 
 	viper.AddConfigPath(configDir)
 	viper.SetConfigName("config")
